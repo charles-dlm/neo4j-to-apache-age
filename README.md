@@ -1,34 +1,34 @@
 # Migration Guide: Moving a Property Graph from Neo4j to Apache AGE
 
-## OBJECTIVE
+## Objective
 
-This guide details the complete procedure to migrate a property graph from a Neo4j Desktop environment.
+This guide details the complete procedure to migrate a property graph from a Neo4j Desktop environment to a PostgreSQL database equipped with Apache AGE.
 
-# 1. DATA EXTRACTION AND PREPARATION FROM NEO4J
+## 1. Data Extraction and Preparation from Neo4j
 
-## Enabling the APOC Extension
+### Enabling the APOC Extension
 
 - Open Neo4j Desktop and navigate to your project settings (DBMS).
-- Locate the plugins section and ensure that the APOC extension is installed and activated for the target database.
+- Locate the plugins section and ensure that the APOC extension is installed and activated.
 
-## Authorizing File Exports
+### Authorizing File Exports
 
-To allow Neo4j to write files directly to your local disk, you must modify or create the `apoc.conf` configuration file.
+To allow Neo4j to write files directly to your local disk:
 
-- Open the `apoc.conf` file (if it does not exist, create it at the root of your DBMS configuration folder).
-- Add the following lines to authorize file import and export operations:
+- Open the `apoc.conf` file.
+- Add the following configuration:
 
 ```ini
 apoc.export.file.enabled=true
 apoc.import.file.enabled=true
 ```
 
-- Stop your running database instance.
-- Close and fully restart the Neo4j Desktop application (or your Browser interface) to permanently apply the modifications.
+- Stop your database instance.
+- Restart Neo4j Desktop.
 
-## Exporting the Graph to JSON Format
+### Exporting the Graph to JSON Format
 
-Open your query interface (Neo4j Browser) and execute the following Cypher instruction to generate a JSON export:
+Execute the following Cypher query:
 
 ```cypher
 CALL apoc.export.json.all(
@@ -37,72 +37,77 @@ CALL apoc.export.json.all(
 )
 ```
 
-Retrieve the newly generated `graph.json` file located inside the `import/` subdirectory of your Neo4j Desktop DBMS folder.
+Retrieve the generated `graph.json` file from the `import/` directory.
 
-# 2. TARGET INFRASTRUCTURE SETUP AND ALIGNMENT
+## 2. Target Infrastructure Setup
 
-## Prerequisites: Apache AGE Deployment
+### Apache AGE Prerequisites
 
-Before proceeding with the import steps, your target environment must be fully functional.
+Ensure that:
 
-Please ensure you have completed all setup requirements and successfully launched the container infrastructure.
+- Apache AGE is installed.
+- PostgreSQL is running.
+- The Docker environment is operational.
 
-## Project Initialization in VS Code
+### Project Initialization
 
-Locate the compressed archive named `source_files.zip` and extract its entire content.
+- Extract `source_files.zip`.
+- Open the `apache_age` directory in VS Code.
+- Copy the extracted files into this directory.
 
-Open your existing Docker environment working directory (`apache_age`) in VS Code, and copy all the extracted files from the ZIP archive into this folder.
+## 3. Python Environment Setup
 
-# 3. PYTHON IMPORT ENVIRONMENT SETUP
+### Creating the Virtual Environment
 
-## Creating and Activating the Virtual Environment (venv)
+Create a virtual environment and place the `requirements.txt` file inside it.
 
-Create a virtual environment inside your working directory and place the `requirements.txt` file inside it.
+Open the Command Palette:
 
-To select the correct Python interpreter within VS Code, open the Command Palette:
-
-### macOS
+**macOS**
 
 ```text
 Cmd + Shift + P
 ```
 
-### Windows / Linux
+**Windows / Linux**
 
 ```text
 Ctrl + Shift + P
 ```
 
-Type and select:
+Select:
 
 ```text
 Python: Create Environment
 ```
 
-Choose to skip the automatic packages installation step (**Skip packages installation**).
+Then choose **Skip packages installation**.
 
-## Installing Dependencies
+### Installing Dependencies
 
-Open the integrated terminal in VS Code (ensuring your virtual environment is active) and execute:
+Run:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> Note: The `json` and `logging` modules are already part of the Python standard library by default; therefore, they do not need to be specified inside the `requirements.txt` file.
+> The `json` and `logging` modules are included in Python's standard library and do not need to be added to `requirements.txt`.
 
-# 4. MIGRATION EXECUTION AND VERIFICATION
+## 4. Migration Execution
 
-## Launching the Transition Script
+### Running the Import Script
 
-Move both the exported `graph.json` file and the `import_graph.py` script into your virtual environment workspace.
+Place the following files in your workspace:
 
-Position your terminal inside the active virtual environment directory, then run:
+- `graph.json`
+- `import_graph.py`
+
+Execute:
 
 ```bash
 python import_graph.py
 ```
 
-Wait for the process to complete.
+### Verification
 
-Once the execution is finished, you can connect to your PostgreSQL database command-line interface to directly verify, manage, and query your migrated property graphs using Apache AGE.
+Once the import is complete, connect to PostgreSQL and verify that your graph has been successfully migrated and is accessible through Apache AGE.
