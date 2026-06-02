@@ -1,7 +1,5 @@
 # Migration Guide: Moving a Property Graph from Neo4j to Apache AGE
-
 ## Objective
-
 This guide details the complete procedure to migrate a property graph from a Neo4j Desktop environment to a PostgreSQL database equipped with Apache AGE.
 
 ## 1. Data Extraction and Preparation from Neo4j
