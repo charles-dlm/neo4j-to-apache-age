@@ -1,2 +1,2 @@
-psycopg
-psycopg-binary
+psycopg>=3.3.0
+psycopg-binary>=3.3.0
