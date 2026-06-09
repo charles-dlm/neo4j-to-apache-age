@@ -35,7 +35,7 @@ graph_name = 'social_media'  # Target graph name
 print("Loading JSON file into memory...")
 
 # Open file and load the complete JSON array into memory
-with open('graph.json', 'r', encoding='utf-8') as f:
+with open('icij.json', 'r', encoding='utf-8') as f:
     all_data = json.load(f)
 
 print(f"File loaded. {len(all_data)} elements found to process.")
@@ -43,6 +43,61 @@ logging.info(f"JSON file loaded containing {len(all_data)} elements.")
 
 relationships = []
 node_count = 0
+
+
+def format_property_value(value):
+    """
+    Analyse, nettoie et type dynamiquement une valeur de propriété 
+    pour la rendre compatible avec Apache AGE.
+    Remplace les antislashs et protège les guillemets.
+    """
+    if value is None:
+        return '""'
+        
+    # Si la valeur est une chaîne de caractères (ou passée comme telle)
+    if isinstance(value, str):
+        val_clean = value.strip()
+        
+        # Gestion des chaînes représentant un "null"
+        if val_clean.lower() == "null" or val_clean == "":
+            return '""'
+            
+        # --- SUPPRESSION DE TOUS LES ANTISLASHES ---
+        val_clean = val_clean.replace('\\', '')
+        
+        # 1. Test Entier (ex: "1998")
+        try:
+            val_int = int(val_clean)
+            return f"toInteger({val_int})"
+        except ValueError:
+            pass
+
+        # 2. Test Flottant (ex: "73.5")
+        try:
+            val_float = float(val_clean)
+            return f"toFloat({val_float})"
+        except ValueError:
+            pass
+
+        # 3. Test Booléen textuel (ex: "true")
+        if val_clean.lower() in ["true", "false"]:
+            return val_clean.lower()
+
+        # 4. Cas général : Texte pur (on échappe les guillemets doubles pour le format AGE)
+        safe_str = val_clean.replace('"', '\\"')
+        return f'"{safe_str}"'
+
+    # Si le type natif Python est déjà un booléen
+    elif isinstance(value, bool):
+        return str(value).lower()
+        
+    # Si le type natif Python est numérique (int / float)
+    elif isinstance(value, (int, float)):
+        return str(value)
+        
+    # Sécurité par défaut
+    return f'"{str(value)}"'
+
 
 # --- FIRST PASS: NODE IMPORT (BATCHES OF 25 IN A SINGLE CREATE) ---
 print("Importing nodes...")
@@ -63,16 +118,8 @@ with conn.transaction():
             props_list = []
             for key, value in properties.items():
                 safe_key = f"`{key}`"  # Handles spaces in property keys
-
-                if isinstance(value, str):
-                    safe_value = value.replace('"', '\\"')
-                    props_list.append(f'{safe_key}: "{safe_value}"')
-                elif isinstance(value, bool):
-                    props_list.append(f'{safe_key}: {str(value).lower()}')
-                elif value is None:
-                    props_list.append(f'{safe_key}: ""')
-                else:
-                    props_list.append(f'{safe_key}: {value}')
+                formatted_val = format_property_value(value)
+                props_list.append(f'{safe_key}: {formatted_val}')
 
             props_clean = "{" + ", ".join(props_list) + "}"
 
@@ -142,16 +189,8 @@ with conn.transaction():
         props_list = []
         for key, value in properties.items():
             safe_key = f"`{key}`"
-
-            if isinstance(value, str):
-                safe_value = value.replace('"', '\\"')
-                props_list.append(f'{safe_key}: "{safe_value}"')
-            elif isinstance(value, bool):
-                props_list.append(f'{safe_key}: {str(value).lower()}')
-            elif value is None:
-                props_list.append(f'{safe_key}: ""')
-            else:
-                props_list.append(f'{safe_key}: {value}')
+            formatted_val = format_property_value(value)
+            props_list.append(f'{safe_key}: {formatted_val}')
 
         props_clean = "{" + ", ".join(props_list) + "}"
 
