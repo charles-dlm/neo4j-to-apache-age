@@ -1,8 +1,8 @@
 import json
-import psycopg  # Strict use of psycopg v3
+import psycopg  # Utilisation stricte de psycopg v3
 import logging
 
-# Log file configuration
+# Configuration du fichier de log (Correction du formatage)
 logging.basicConfig(
     filename='apache_age_import_commands.txt',
     filemode='w',
@@ -11,7 +11,7 @@ logging.basicConfig(
     encoding='utf-8'
 )
 
-# 1. Connection to Apache AGE database (Docker) via psycopg3
+# 1. Connexion à la base de données Apache AGE
 conn = psycopg.connect(
     host="localhost",
     port="5432",
@@ -19,232 +19,161 @@ conn = psycopg.connect(
     user="postgres",
     password="password"
 )
-
-# Explicit autocommit configuration (required for psycopg3 in your architecture)
 conn.autocommit = True
-
 cursor = conn.cursor()
-logging.info("Connection established with PostgreSQL (psycopg3).")
 
-# 2. Apache AGE session initialization (executes immediately due to autocommit)
+# Initialisation d'Apache AGE
 cursor.execute("LOAD 'age';")
 cursor.execute("SET search_path = ag_catalog, '$user', public;")
 
-graph_name = 'social_media'  # Target graph name
+graph_name = 'social_media'
 
-print("Loading JSON file into memory...")
+# Liste des types de nœuds récupérés en amont de Neo4j
+labels_list = ["Entity", "Address", "Intermediary", "Officer", "Other"]
 
-# Open file and load the complete JSON array into memory
+print("--- PHASE 0 : CRÉATION DES TABLES PAR TYPE DE NOEUD ---")
+for label in labels_list:
+    try:
+        # create_vlabel crée explicitement la table physique dans PostgreSQL
+        cursor.execute(f"SELECT create_vlabel('{graph_name}', '{label}');")
+        logging.info(f"Table physique pour le label '{label}' créée ou déjà existante.")
+    except Exception as e:
+        # Si le label existe déjà, Apache AGE lève une erreur, on passe outre proprement
+        logging.info(f"Note pour le label '{label}' : {e}")
+
+print("Chargement du fichier JSON en mémoire...")
 with open('icij.json', 'r', encoding='utf-8') as f:
     all_data = json.load(f)
 
-print(f"File loaded. {len(all_data)} elements found to process.")
-logging.info(f"JSON file loaded containing {len(all_data)} elements.")
-
-relationships = []
-node_count = 0
+print(f"Fichier chargé. {len(all_data)} éléments à traiter.")
 
 
 def format_property_value(value):
-    """
-    Analyse, nettoie et type dynamiquement une valeur de propriété 
-    pour la rendre compatible avec Apache AGE.
-    Remplace les antislashs et protège les guillemets.
-    """
+    """Nettoie et type les valeurs pour Apache AGE."""
     if value is None:
         return '""'
-        
-    # Si la valeur est une chaîne de caractères (ou passée comme telle)
     if isinstance(value, str):
-        val_clean = value.strip()
-        
-        # Gestion des chaînes représentant un "null"
+        val_clean = value.strip().replace('\\', '')
         if val_clean.lower() == "null" or val_clean == "":
             return '""'
-            
-        # --- SUPPRESSION DE TOUS LES ANTISLASHES ---
-        val_clean = val_clean.replace('\\', '')
-        
-        # 1. Test Entier (ex: "1998")
         try:
-            val_int = int(val_clean)
-            return f"toInteger({val_int})"
+            return f"toInteger({int(val_clean)})"
         except ValueError:
             pass
-
-        # 2. Test Flottant (ex: "73.5")
         try:
-            val_float = float(val_clean)
-            return f"toFloat({val_float})"
+            return f"toFloat({float(val_clean)})"
         except ValueError:
             pass
-
-        # 3. Test Booléen textuel (ex: "true")
         if val_clean.lower() in ["true", "false"]:
             return val_clean.lower()
-
-        # 4. Cas général : Texte pur (on échappe les guillemets doubles pour le format AGE)
         safe_str = val_clean.replace('"', '\\"')
         return f'"{safe_str}"'
-
-    # Si le type natif Python est déjà un booléen
     elif isinstance(value, bool):
         return str(value).lower()
-        
-    # Si le type natif Python est numérique (int / float)
     elif isinstance(value, (int, float)):
         return str(value)
-        
-    # Sécurité par défaut
     return f'"{str(value)}"'
 
 
-# --- FIRST PASS: NODE IMPORT (BATCHES OF 25 IN A SINGLE CREATE) ---
-print("Importing nodes...")
-batch_creates = []  # Buffer to store internal "CREATE (...)" lines
+# Dictionnaire temporaire pour la deuxième phase (savoir quel nœud appartient à quelle table)
+node_type_lookup = {}
 
-# Open an explicit psycopg3 transactional block (temporarily disables autocommit)
+print("\n--- PHASE 1 : INSERTION DES NOEUDS DANS LEURS TABLES RESPECTIVES ---")
+node_count = 0
+
+# Utilisation d'une transaction pour accélérer l'écriture de masse
 with conn.transaction():
     for data in all_data:
         if data['type'] == 'node':
             node_id = data['id']
-            label = data['labels'][0] if data['labels'] else 'Unlabeled'
+            # On récupère le type (label), par défaut 'Other' si absent
+            label = data['labels'][0] if data['labels'] else 'Other'
             properties = data['properties']
-
-            # Inject the original Neo4j ID into the AGE node properties
+            
+            # Sauvegarde du type pour la phase relation
+            node_type_lookup[node_id] = label
+            
+            # Injection de l'ID Neo4j d'origine dans les propriétés
             properties['neo4j_id'] = node_id
 
-            # Property formatting (using backticks for keys)
             props_list = []
             for key, value in properties.items():
-                safe_key = f"`{key}`"  # Handles spaces in property keys
-                formatted_val = format_property_value(value)
-                props_list.append(f'{safe_key}: {formatted_val}')
-
+                props_list.append(f"`{key}`: {format_property_value(value)}")
             props_clean = "{" + ", ".join(props_list) + "}"
 
-            # Store only the internal creation instruction with a unique alias (v_id)
-            single_create = f"CREATE (v_{node_id}:{label} {props_clean})"
-            batch_creates.append(single_create)
-            node_count += 1
-
-            # Once the buffer contains 25 nodes, forge and execute the single global query
-            if len(batch_creates) == 25:
-                try:
-                    # Multi-line string replaced by clear string concatenation with \n
-                    cypher_query = "\n".join(batch_creates)
-                    full_query = f"SELECT * FROM cypher('{graph_name}', $$ {cypher_query} $$) AS (v agtype);"
-                    
-                    cursor.execute(full_query)
-                    batch_creates = []  # Clear the buffer
-                    
-                    logging.info(f"[BATCH] 25 nodes injected in 1 Cypher call (Total parsed: {node_count})")
-                    if node_count % 500 == 0:
-                        print(f"   -> {node_count} nodes imported...")
-                except Exception as e:
-                    logging.error(f"Error during batch node execution around total count {node_count}: {e}")
-                    print(f"Error during batch node execution: {e}")
-                    # Propagate exception to force the automatic ROLLBACK of the transactional block
-                    raise e
-
-        elif data['type'] == 'relationship':
-            relationships.append(data)
-
-    # Handle the remainder (if the total number of nodes is not an exact multiple of 25)
-    if batch_creates:
-        try:
-            cypher_query = "\n".join(batch_creates)
+            # L'insertion cible directement la table du Label
+            cypher_query = f"CREATE (v:{label} {props_clean})"
             full_query = f"SELECT * FROM cypher('{graph_name}', $$ {cypher_query} $$) AS (v agtype);"
-            cursor.execute(full_query)
-            logging.info(f"[BATCH-FINAL] Last {len(batch_creates)} nodes injected in 1 Cypher call.")
-        except Exception as e:
-            logging.error(f"Error during final batch node execution: {e}")
-            print(f"Error during final batch node execution: {e}")
-            raise e
-
-print(f"Node import completed ({node_count} nodes).")
-logging.info(f"Node import completed. Total: {node_count}")
-
-# --- CRITICAL INDEX CREATION ---
-print("Creating index to speed up relationship linking...")
-# SQL multi-line replaced to avoid GitHub code highlighting issues
-index_query = f"CREATE INDEX IF NOT EXISTS idx_neo4j_id ON \"{graph_name}\".\"_ag_label_vertex\" (ag_catalog.agtype_access_operator(properties, '\"neo4j_id\"'));"
-cursor.execute(index_query)
-
-# --- SECOND PASS: RELATIONSHIP IMPORT (BATCHES OF 25 SIMULTANEOUS MATCH/CREATE) ---
-print(f"Linking {len(relationships)} relationships...")
-rel_count = 0
-batch_matches = []
-batch_creates_rel = []
-
-# Open the second transactional block for secure edge creation
-with conn.transaction():
-    for rel in relationships:
-        start_id = rel['start']['id']
-        end_id = rel['end']['id']
-        rel_type = rel['label']
-        properties = rel.get('properties', {})
-
-        # Property formatting for the relationship
-        props_list = []
-        for key, value in properties.items():
-            safe_key = f"`{key}`"
-            formatted_val = format_property_value(value)
-            props_list.append(f'{safe_key}: {formatted_val}')
-
-        props_clean = "{" + ", ".join(props_list) + "}"
-
-        # Define unique aliases per relationship to prevent clashing within the same query
-        alias_a = f"a_{rel_count}"
-        alias_b = f"b_{rel_count}"
-        alias_r = f"r_{rel_count}"
-
-        # Fill the two separate buffers (MATCHs on one side, CREATEs on the other)
-        batch_matches.append(f"MATCH ({alias_a}), ({alias_b}) WHERE {alias_a}.neo4j_id = '{start_id}' AND {alias_b}.neo4j_id = '{end_id}'")
-        batch_creates_rel.append(f"CREATE ({alias_a})-[{alias_r}:{rel_type} {props_clean}]->({alias_b})")
-        rel_count += 1
-
-        # Once a batch of 25 relationships is reached, merge the buffers
-        if len(batch_matches) == 25:
-            try:
-                # Concatenate all MATCHs first, then all CREATEs as required by Cypher
-                cypher_internal = "\n".join(batch_matches) + "\n" + "\n".join(batch_creates_rel)
-                full_query = f"SELECT * FROM cypher('{graph_name}', $$ {cypher_internal} $$) AS (r agtype);"
-                
-                cursor.execute(full_query)
-                
-                # Reset batch buffers
-                batch_matches = []
-                batch_creates_rel = []
-                
-                logging.info(f"[BATCH] 25 relationships linked in 1 Cypher call (Total parsed: {rel_count})")
-                if rel_count % 500 == 0:
-                    print(f"   -> {rel_count} relationships linked...")
-            except Exception as e:
-                logging.error(f"Error during batch relationship execution around total count {rel_count}: {e}")
-                print(f"Error during batch relationship execution: {e}")
-                raise e
-
-    # Handle the remainder for the last remaining relationships
-    if batch_matches:
-        try:
-            cypher_internal = "\n".join(batch_matches) + "\n" + "\n".join(batch_creates_rel)
-            full_query = f"SELECT * FROM cypher('{graph_name}', $$ {cypher_internal} $$) AS (r agtype);"
             
             cursor.execute(full_query)
-            logging.info(f"[BATCH-FINAL] Last {len(batch_matches)} relationships linked in 1 Cypher call.")
-        except Exception as e:
-            logging.error(f"Error during final batch relationship execution: {e}")
-            print(f"Error during final batch relationship execution: {e}")
-            raise e
+            node_count += 1
+            
+            if node_count % 50000 == 0:
+                print(f"   -> {node_count} nœuds insérés...")
 
-print(
-    f"Import completed successfully! Total: {node_count} nodes and {rel_count} relationships."
-)
-logging.info(
-    f"Import completed successfully! Total: {node_count} nodes and {rel_count} relationships."
-)
+print(f"Insertion des nœuds terminée : {node_count} nœuds répartis dans leurs tables.")
 
-# Clean closure of cursors and connections
+
+print("\n--- CRÉATION DES INDEX RECHERCHE SUR CHAQUE TABLE ---")
+# Sans ces index, PostgreSQL se fige lors du MATCH des relations
+for lbl in labels_list:
+    index_query = f"""
+    CREATE INDEX IF NOT EXISTS idx_{lbl.lower()}_neo4j_id 
+    ON "{graph_name}"."{lbl}" (ag_catalog.agtype_access_operator(properties, '"neo4j_id"'));
+    """
+    cursor.execute(index_query)
+    print(f" -> Index de recherche activé sur la table '{lbl}'")
+
+
+print("\n--- PHASE 2 : CRÉATION DES RELATIONS AVEC RECHERCHE CIBLÉE ---")
+rel_count = 0
+success_rel = 0
+
+with conn.transaction():
+    for data in all_data:
+        if data['type'] == 'relationship':
+            rel_count += 1
+            start_id = data['start']['id']
+            end_id = data['end']['id']
+            rel_type = data['label']
+            properties = data.get('properties', {})
+
+            # Récupération du type de la table cible pour le nœud de départ et d'arrivée
+            start_label = node_type_lookup.get(start_id)
+            end_label = node_type_lookup.get(end_id)
+
+            # Si on ne trouve pas le type dans notre historique, on ne peut pas cibler la bonne table
+            if not start_label or not end_label:
+                logging.warning(f"Relation sautée : Nœud de départ {start_id} ou d'arrivée {end_id} introuvable.")
+                continue
+
+            props_list = []
+            for key, value in properties.items():
+                props_list.append(f"`{key}`: {format_property_value(value)}")
+            props_clean = "{" + ", ".join(props_list) + "}"
+
+            # REQUÊTE CIBLÉE : On force MATCH à chercher uniquement dans :start_label et :end_label
+            # On traite une relation par une pour isoler les erreurs et garantir l'écriture
+            cypher_rel = f"""
+                MATCH (a:{start_label}), (b:{end_label})
+                WHERE a.neo4j_id = {start_id} AND b.neo4j_id = {end_id}
+                CREATE (a)-[r:{rel_type} {props_clean}]->(b)
+            """
+            
+            full_query = f"SELECT * FROM cypher('{graph_name}', $$ {cypher_rel} $$) AS (r agtype);"
+            
+            try:
+                cursor.execute(full_query)
+                success_rel += 1
+            except Exception as e:
+                logging.error(f"Échec création relation entre {start_id} et {end_id} : {e}")
+            
+            if rel_count % 25000 == 0:
+                print(f"   -> {rel_count} relations analysées... ({success_rel} créées en base)")
+
+print(f"\nImportation définitive terminée !")
+print(f"Total nœuds : {node_count}")
+print(f"Total relations créées avec succès : {success_rel} (sur {rel_count} analysées).")
+
 cursor.close()
 conn.close()
