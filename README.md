@@ -26,6 +26,37 @@ apoc.import.file.enabled=true
 * Stop your database instance.
 * Restart Neo4j Desktop.
 
+### Retrieving Node Labels and Relationship Types
+
+Before running the migration, you must retrieve the complete list of node labels and relationship types present in your Neo4j graph.
+
+These values will later be assigned to the variables:
+
+* `labels_list`
+* `relations_list`
+
+Execute the following Cypher query in Neo4j to retrieve all node labels:
+
+```cypher
+CALL db.labels() YIELD label
+WITH collect(label) AS labels
+RETURN apoc.text.format("%s", [labels]) AS list;
+```
+
+The returned value should be copied and assigned to the `labels_list` variable.
+
+Then execute the following Cypher query to retrieve all relationship types:
+
+```cypher
+CALL db.relationshipTypes() YIELD relationshipType
+WITH collect(relationshipType) AS rels
+RETURN apoc.text.format("%s", [rels]) AS list;
+```
+
+The returned value should be copied and assigned to the `relations_list` variable.
+
+These two queries must be executed directly in Neo4j before launching the migration process.
+
 ### Exporting the Graph to JSON Format
 
 Execute the following Cypher query:
@@ -115,6 +146,13 @@ Place the following files in your workspace:
 
 * `graph.json`
 * `import_graph.py`
+
+Before executing the script, update the values of:
+
+* `labels_list`
+* `relations_list`
+
+using the results obtained from the Neo4j queries described in the **Retrieving Node Labels and Relationship Types** section.
 
 Execute:
 
