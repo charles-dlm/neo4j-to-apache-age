@@ -1,8 +1,8 @@
 import json
-import psycopg  # Utilisation stricte de psycopg v3
+import psycopg  # Strict usage of psycopg v3
 import logging
 
-# Configuration du fichier de log (Correction du formatage)
+# Log file configuration (Fixed formatting)
 logging.basicConfig(
     filename='apache_age_import_commands.txt',
     filemode='w',
@@ -11,7 +11,7 @@ logging.basicConfig(
     encoding='utf-8'
 )
 
-# 1. Connexion à la base de données Apache AGE
+# 1. Connection to the Apache AGE database
 conn = psycopg.connect(
     host="localhost",
     port="5432",
@@ -22,34 +22,49 @@ conn = psycopg.connect(
 conn.autocommit = True
 cursor = conn.cursor()
 
-# Initialisation d'Apache AGE
+# Initialization of Apache AGE
 cursor.execute("LOAD 'age';")
 cursor.execute("SET search_path = ag_catalog, '$user', public;")
 
-graph_name = 'social_media'
+graph_name = 'graph1'
 
-# Liste des types de nœuds récupérés en amont de Neo4j
+# List of node types and relationship types retrieved from Neo4j
 labels_list = ["Entity", "Address", "Intermediary", "Officer", "Other"]
+relations_list = [
+    "similar", "same_name_as", "intermediary_of", "same_intermediary_as", 
+    "registered_address", "same_as", "same_id_as", "underlying", 
+    "similar_company_as", "same_address_as", "connected_to", "officer_of", 
+    "probably_same_officer_as", "same_company_as"
+]
 
-print("--- PHASE 0 : CRÉATION DES TABLES PAR TYPE DE NOEUD ---")
+print("--- PHASE 0-A: CREATING TABLES BY NODE TYPE ---")
 for label in labels_list:
     try:
-        # create_vlabel crée explicitement la table physique dans PostgreSQL
+        # create_vlabel explicitly creates the physical node table in PostgreSQL
         cursor.execute(f"SELECT create_vlabel('{graph_name}', '{label}');")
-        logging.info(f"Table physique pour le label '{label}' créée ou déjà existante.")
+        logging.info(f"Physical table for node label '{label}' created or already exists.")
     except Exception as e:
-        # Si le label existe déjà, Apache AGE lève une erreur, on passe outre proprement
-        logging.info(f"Note pour le label '{label}' : {e}")
+        logging.info(f"Note for node label '{label}': {e}")
 
-print("Chargement du fichier JSON en mémoire...")
+print("\n--- PHASE 0-B: CREATING PARTITION TABLES BY RELATIONSHIP TYPE ---")
+for rel_type in relations_list:
+    try:
+        # create_elabel isolates each relationship type into its own physical PostgreSQL table
+        # This enables native Postgres Partition Pruning during queries
+        cursor.execute(f"SELECT create_elabel('{graph_name}', '{rel_type}');")
+        logging.info(f"Physical table (partitioning) for relationship '{rel_type}' created or already exists.")
+    except Exception as e:
+        logging.info(f"Note for relationship '{rel_type}': {e}")
+
+print("\nLoading JSON file into memory...")
 with open('icij.json', 'r', encoding='utf-8') as f:
     all_data = json.load(f)
 
-print(f"Fichier chargé. {len(all_data)} éléments à traiter.")
+print(f"File loaded. {len(all_data)} elements to process.")
 
 
 def format_property_value(value):
-    """Nettoie et type les valeurs pour Apache AGE."""
+    """Cleans and types values specifically for Apache AGE."""
     if value is None:
         return '""'
     if isinstance(value, str):
@@ -75,25 +90,25 @@ def format_property_value(value):
     return f'"{str(value)}"'
 
 
-# Dictionnaire temporaire pour la deuxième phase (savoir quel nœud appartient à quelle table)
+# Temporary dictionary for the second phase (to map which node belongs to which table)
 node_type_lookup = {}
 
-print("\n--- PHASE 1 : INSERTION DES NOEUDS DANS LEURS TABLES RESPECTIVES ---")
+print("\n--- PHASE 1: INSERTING NODES INTO THEIR RESPECTIVE TABLES ---")
 node_count = 0
 
-# Utilisation d'une transaction pour accélérer l'écriture de masse
+# Using a transaction to speed up batch bulk writes
 with conn.transaction():
     for data in all_data:
         if data['type'] == 'node':
             node_id = data['id']
-            # On récupère le type (label), par défaut 'Other' si absent
+            # Retrieve the type (label), defaults to 'Other' if missing
             label = data['labels'][0] if data['labels'] else 'Other'
             properties = data['properties']
             
-            # Sauvegarde du type pour la phase relation
+            # Save the type for the relationship phase
             node_type_lookup[node_id] = label
             
-            # Injection de l'ID Neo4j d'origine dans les propriétés
+            # Inject the original Neo4j ID into properties
             properties['neo4j_id'] = node_id
 
             props_list = []
@@ -101,7 +116,7 @@ with conn.transaction():
                 props_list.append(f"`{key}`: {format_property_value(value)}")
             props_clean = "{" + ", ".join(props_list) + "}"
 
-            # L'insertion cible directement la table du Label
+            # The insertion directly targets the Label table
             cypher_query = f"CREATE (v:{label} {props_clean})"
             full_query = f"SELECT * FROM cypher('{graph_name}', $$ {cypher_query} $$) AS (v agtype);"
             
@@ -109,23 +124,23 @@ with conn.transaction():
             node_count += 1
             
             if node_count % 50000 == 0:
-                print(f"   -> {node_count} nœuds insérés...")
+                print(f"   -> {node_count} nodes inserted...")
 
-print(f"Insertion des nœuds terminée : {node_count} nœuds répartis dans leurs tables.")
+print(f"Node insertion completed: {node_count} nodes distributed across tables.")
 
 
-print("\n--- CRÉATION DES INDEX RECHERCHE SUR CHAQUE TABLE ---")
-# Sans ces index, PostgreSQL se fige lors du MATCH des relations
+print("\n--- CREATING LOOKUP INDEXES ON EACH TABLE ---")
+# Without these indexes, PostgreSQL freezes during relationship MATCH operations
 for lbl in labels_list:
     index_query = f"""
     CREATE INDEX IF NOT EXISTS idx_{lbl.lower()}_neo4j_id 
     ON "{graph_name}"."{lbl}" (ag_catalog.agtype_access_operator(properties, '"neo4j_id"'));
     """
     cursor.execute(index_query)
-    print(f" -> Index de recherche activé sur la table '{lbl}'")
+    print(f" -> Lookup index enabled on table '{lbl}'")
 
 
-print("\n--- PHASE 2 : CRÉATION DES RELATIONS AVEC RECHERCHE CIBLÉE ---")
+print("\n--- PHASE 2: CREATING RELATIONSHIPS WITH TARGETED LOOKUPS ---")
 rel_count = 0
 success_rel = 0
 
@@ -138,13 +153,13 @@ with conn.transaction():
             rel_type = data['label']
             properties = data.get('properties', {})
 
-            # Récupération du type de la table cible pour le nœud de départ et d'arrivée
+            # Retrieve the target table label for both start and end nodes
             start_label = node_type_lookup.get(start_id)
             end_label = node_type_lookup.get(end_id)
 
-            # Si on ne trouve pas le type dans notre historique, on ne peut pas cibler la bonne table
+            # If the label is missing from our lookup history, we cannot target the correct table
             if not start_label or not end_label:
-                logging.warning(f"Relation sautée : Nœud de départ {start_id} ou d'arrivée {end_id} introuvable.")
+                logging.warning(f"Relationship skipped: Start node {start_id} or End node {end_id} not found.")
                 continue
 
             props_list = []
@@ -152,8 +167,8 @@ with conn.transaction():
                 props_list.append(f"`{key}`: {format_property_value(value)}")
             props_clean = "{" + ", ".join(props_list) + "}"
 
-            # REQUÊTE CIBLÉE : On force MATCH à chercher uniquement dans :start_label et :end_label
-            # On traite une relation par une pour isoler les erreurs et garantir l'écriture
+            # TARGETED QUERY: Forces MATCH to look directly inside :start_label and :end_label
+            # Explicitly specifies [r:{rel_type}] to enforce Partition Pruning in Postgres
             cypher_rel = f"""
                 MATCH (a:{start_label}), (b:{end_label})
                 WHERE a.neo4j_id = {start_id} AND b.neo4j_id = {end_id}
@@ -166,14 +181,14 @@ with conn.transaction():
                 cursor.execute(full_query)
                 success_rel += 1
             except Exception as e:
-                logging.error(f"Échec création relation entre {start_id} et {end_id} : {e}")
+                logging.error(f"Failed to create relationship between {start_id} and {end_id}: {e}")
             
             if rel_count % 25000 == 0:
-                print(f"   -> {rel_count} relations analysées... ({success_rel} créées en base)")
+                print(f"   -> {rel_count} relationships analyzed... ({success_rel} created in database)")
 
-print(f"\nImportation définitive terminée !")
-print(f"Total nœuds : {node_count}")
-print(f"Total relations créées avec succès : {success_rel} (sur {rel_count} analysées).")
+print(f"\nFinal import completed!")
+print(f"Total nodes: {node_count}")
+print(f"Total relationships successfully created: {success_rel} (out of {rel_count} analyzed).")
 
 cursor.close()
 conn.close()
